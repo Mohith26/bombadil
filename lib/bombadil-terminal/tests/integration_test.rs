@@ -6,14 +6,15 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bombadil::driver::{
-    ActionTemplate, InterfaceDriver, NoopTraceWriter, RunId,
+    ActionTemplate, DriverEvent, InterfaceDriver, InterfaceSession,
+    NoopTraceWriter, RunId,
 };
 use bombadil::runner::{self, ControlFlow, PropertiesState, RunStrategy};
 use bombadil::specification::bundler::bundle;
 use bombadil::specification::domain::Snapshot;
 use bombadil::specification::verifier::{Specification, Verifier};
 use bombadil::tree::Tree;
-use bombadil_schema::terminal::TerminalSize;
+use bombadil_schema::terminal::{TerminalCell, TerminalSize};
 use bombadil_terminal::driver::{TerminalAction, TerminalDriver};
 use bombadil_terminal::driver::{TerminalActionTemplate, TerminalSession};
 use bombadil_terminal::state::TerminalState;
@@ -358,6 +359,62 @@ export const noop = actions(() => [{ TypeText: { CharSet: [{ Literal: "" }] } }]
 "#,
     )
     .run();
+}
+
+/// A state sampled while the program is in the middle of an escape
+/// sequence still has a terminal snapshot.
+#[test]
+fn test_snapshot_mid_escape_sequence() {
+    setup();
+    let mut specification_file = NamedTempFile::with_suffix(".ts").unwrap();
+    specification_file
+        .write_all(
+            br#"
+import { actions } from "@antithesishq/bombadil/terminal";
+
+export const noop = actions(() => [{ TypeText: { CharSet: [{ Literal: "" }] } }]);
+"#,
+        )
+        .unwrap();
+    let driver = TerminalDriver {
+        specification_bundle: bundle(
+            ".",
+            &specification_file.path().display().to_string(),
+        )
+        .unwrap()
+        .into(),
+        program_options: bombadil_terminal::driver::TerminalProgramOptions {
+            // Small, so encoding is cheap.
+            size: TerminalSize {
+                columns: 10,
+                rows: 2,
+            },
+            scrollback_lines_max: MAX_SCROLLBACK,
+            quiescence_timeout: Duration::from_millis(10),
+            program: "sh".to_string(),
+            arguments: ["-c", "printf 'abc\\033[3'; sleep 10"]
+                .map(String::from)
+                .to_vec(),
+        },
+    };
+    let mut session = driver.new_session(RunId::default()).unwrap();
+    let deadline = std::time::Instant::now() + TEST_TIMEOUT;
+    let state = loop {
+        assert!(std::time::Instant::now() < deadline, "never saw the output");
+        let Some(DriverEvent::StateChanged(state)) =
+            session.next_event(Duration::MAX)
+        else {
+            panic!("expected a state");
+        };
+        if matches!(
+            &state.grid[(0, 2)],
+            TerminalCell::Occupied { contents, .. } if contents.to_string() == "c"
+        ) {
+            break state;
+        }
+    };
+    session.terminate().unwrap();
+    assert!(state.terminal_snapshot.is_some());
 }
 
 struct IntegrationTestStrategy {

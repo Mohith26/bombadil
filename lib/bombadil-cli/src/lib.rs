@@ -1,4 +1,5 @@
 mod browser;
+mod browser_trace;
 mod duration;
 #[cfg(feature = "external")]
 mod external;
@@ -7,6 +8,7 @@ mod output_path;
 mod shrink;
 #[cfg(feature = "terminal")]
 mod terminal;
+mod trace;
 
 use anyhow::Result;
 
@@ -39,6 +41,8 @@ enum Command {
         #[command(subcommand)]
         command: terminal::Command,
     },
+    /// Show the states of a binary trace file (any filename)
+    Trace(trace::TraceArgs),
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -51,5 +55,6 @@ pub fn run(cli: Cli) -> Result<()> {
             terminal::run(command);
             Ok(())
         }
+        Command::Trace(args) => trace::run(args),
     }
 }
