@@ -14,7 +14,7 @@ use bombadil_schema::{Time, markup};
 use futures_util::stream::{self, Stream};
 use rand::SeedableRng;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     sync::{Arc, Mutex, atomic::AtomicBool},
 };
@@ -95,6 +95,7 @@ struct BrowserIntegrationTest<'a> {
     cookies: Vec<BrowserCookie>,
     allow_urls: Option<Vec<bombadil_browser::match_pattern::MatchPattern>>,
     file_origin: bool,
+    coverage_edges_min: Option<usize>,
 }
 
 impl<'a> BrowserIntegrationTest<'a> {
@@ -115,12 +116,18 @@ impl<'a> BrowserIntegrationTest<'a> {
             cookies: vec![],
             allow_urls: None,
             file_origin: false,
+            coverage_edges_min: None,
         }
     }
 
     #[allow(dead_code, reason = "can be overridden to reproduce failures")]
     fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
+        self
+    }
+
+    fn coverage_edges_min(mut self, count: usize) -> Self {
+        self.coverage_edges_min = Some(count);
         self
     }
 
@@ -202,6 +209,7 @@ impl<'a> BrowserIntegrationTest<'a> {
             cookies,
             allow_urls,
             file_origin,
+            coverage_edges_min,
         } = self;
         setup();
         let _guard = acquire();
@@ -404,12 +412,13 @@ impl<'a> BrowserIntegrationTest<'a> {
         struct ViolationsCollectingTraceWriter {
             violations: CollectedViolations,
             state_times: Arc<Mutex<Vec<SystemTime>>>,
+            coverage_edges: Arc<Mutex<HashSet<u32>>>,
         }
 
         impl TraceWriter<BrowserSession> for ViolationsCollectingTraceWriter {
             fn write(
                 &mut self,
-                _state: &bombadil_browser::browser::state::BrowserState,
+                state: &bombadil_browser::browser::state::BrowserState,
                 _last_action: Option<&BrowserAction>,
                 _snapshots: &[bombadil::specification::domain::Snapshot],
                 violations: &[bombadil::runner::PropertyViolation],
@@ -418,6 +427,17 @@ impl<'a> BrowserIntegrationTest<'a> {
                     .lock()
                     .expect("failed to acquire lock for state times")
                     .push(SystemTime::now());
+                self.coverage_edges
+                    .lock()
+                    .expect("failed to acquire lock for coverage edges")
+                    .extend(
+                        state
+                            .coverage
+                            .edges_new
+                            .iter()
+                            .filter(|(_, bucket)| *bucket > 0)
+                            .map(|(index, _)| *index),
+                    );
                 self.violations
                     .lock()
                     .expect("failed to acquire lock for collected violations")
@@ -517,6 +537,17 @@ impl<'a> BrowserIntegrationTest<'a> {
                 Outcome::Error(anyhow!(
                     "no new state for {:?}, the browser likely stalled",
                     state_interval_longest
+                ))
+            }
+            Ok(_)
+                if coverage_edges_min.is_some_and(|min| {
+                    trace_writer.coverage_edges.lock().unwrap().len() < min
+                }) =>
+            {
+                Outcome::Error(anyhow!(
+                    "expected at least {} coverage edges, but got {}",
+                    coverage_edges_min.unwrap(),
+                    trace_writer.coverage_edges.lock().unwrap().len(),
                 ))
             }
             Ok(_) if violations_count == 0 => Outcome::Success,
@@ -1180,6 +1211,34 @@ export const greetedByName = eventually(() => {
   return name !== null && messages.includes(`server: Nice to meet you ${name}`);
 }).within(10, "seconds");
 "#,
+        )
+        .run();
+}
+
+#[test]
+fn test_worker_coverage() {
+    BrowserIntegrationTest::new("worker-coverage")
+        .time_limit(Duration::from_secs(10))
+        .coverage_edges_min(40)
+        .specification(
+            r##"
+import { eventually } from "@antithesishq/bombadil";
+import { actions, extract } from "@antithesishq/bombadil/browser";
+
+export const waits = actions(() => ["Wait"]);
+
+const results = extract((state) =>
+  Array.from(state.document.querySelectorAll("#results>li")).map(
+    (item) => item.textContent,
+  ),
+);
+
+export const workersReplied = eventually(
+  () =>
+    results.current.includes("classic: 147") &&
+    results.current.includes("module: 140"),
+).within(5, "seconds");
+"##,
         )
         .run();
 }

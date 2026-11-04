@@ -35,6 +35,14 @@ pub fn instrument_js_coverage(
                         .resource_type(network::ResourceType::Document)
                         .build(),
                 )
+                // Chrome reports worker scripts, and modules imported by
+                // module workers, as `Other`.
+                .pattern(
+                    fetch::RequestPattern::builder()
+                        .request_stage(fetch::RequestStage::Response)
+                        .resource_type(network::ResourceType::Other)
+                        .build(),
+                )
                 .build(),
             Some(session_id),
         )
@@ -48,9 +56,24 @@ pub fn instrument_js_coverage(
     let (error_tx, error_rx) = mpmc::bounded(1);
     let worker = thread::spawn(move || -> Result<()> {
         let intercept = |event: &fetch::EventRequestPaused| -> Result<()> {
-            // Any non-200 upstream response is forwarded as-is.
-            if let Some(status) = event.response_status_code
-                && status != 200
+            let content_type =
+                event.response_headers.as_ref().and_then(|headers| {
+                    headers
+                        .iter()
+                        .find(|h| h.name.eq_ignore_ascii_case("content-type"))
+                        .map(|h| h.value.as_str())
+                });
+            let is_worker_script = event.resource_type
+                == network::ResourceType::Other
+                && content_type.is_some_and(is_javascript_mime_type);
+
+            // Any non-200 upstream response, and any `Other` resource that
+            // isn't JavaScript, is forwarded as-is.
+            if event
+                .response_status_code
+                .is_some_and(|status| status != 200)
+                || (event.resource_type == network::ResourceType::Other
+                    && !is_worker_script)
             {
                 return connection
                     .send(
@@ -98,19 +121,13 @@ pub fn instrument_js_coverage(
 
             let is_html_document = event.resource_type
                 == network::ResourceType::Document
-                && event
-                    .response_headers
-                    .as_ref()
-                    .and_then(|headers| {
-                        headers.iter().find(|h| {
-                            h.name.eq_ignore_ascii_case("content-type")
-                        })
-                    })
-                    .map(|h| h.value.starts_with("text/html"))
+                && content_type
+                    .map(|value| value.starts_with("text/html"))
                     .unwrap_or_else(|| !body.trim_start().starts_with("<?xml"));
 
             let body_instrumented = if event.resource_type
                 == network::ResourceType::Script
+                || is_worker_script
             {
                 if !config.instrument_files {
                     log::debug!(
@@ -142,7 +159,7 @@ pub fn instrument_js_coverage(
                 body.clone()
             } else {
                 bail!(
-                    "should only intercept script and document resources, but got {:?}",
+                    "should only intercept script, worker script and document resources, but got {:?}",
                     event.resource_type
                 );
             };
@@ -263,11 +280,62 @@ pub fn instrument_js_coverage(
     Ok(error_rx)
 }
 
+/// Whether a Content-Type value names a JavaScript MIME type, as listed in
+/// https://mimesniff.spec.whatwg.org/#javascript-mime-type.
+fn is_javascript_mime_type(content_type: &str) -> bool {
+    const ESSENCES: [&str; 16] = [
+        "application/ecmascript",
+        "application/javascript",
+        "application/x-ecmascript",
+        "application/x-javascript",
+        "text/ecmascript",
+        "text/javascript",
+        "text/javascript1.0",
+        "text/javascript1.1",
+        "text/javascript1.2",
+        "text/javascript1.3",
+        "text/javascript1.4",
+        "text/javascript1.5",
+        "text/jscript",
+        "text/livescript",
+        "text/x-ecmascript",
+        "text/x-javascript",
+    ];
+    let essence = content_type.split(';').next().unwrap_or("").trim();
+    ESSENCES
+        .iter()
+        .any(|candidate| essence.eq_ignore_ascii_case(candidate))
+}
+
 /// Calculate source ID from etag or body.
 fn source_id(headers: HashMap<String, String>, body: &str) -> SourceId {
     if let Some(etag) = headers.get("etag") {
         SourceId::hash(etag)
     } else {
         SourceId::hash(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_javascript_mime_type;
+
+    #[test]
+    fn javascript_mime_types() {
+        assert!(is_javascript_mime_type("text/javascript"));
+        assert!(is_javascript_mime_type("application/javascript"));
+        assert!(is_javascript_mime_type("Text/JavaScript; charset=utf-8"));
+        assert!(is_javascript_mime_type(" application/x-javascript "));
+        assert!(is_javascript_mime_type("text/ecmascript"));
+    }
+
+    #[test]
+    fn non_javascript_mime_types() {
+        assert!(!is_javascript_mime_type(""));
+        assert!(!is_javascript_mime_type("text/html"));
+        assert!(!is_javascript_mime_type("application/json"));
+        assert!(!is_javascript_mime_type("image/x-icon"));
+        assert!(!is_javascript_mime_type("application/wasm"));
+        assert!(!is_javascript_mime_type("text/javascript-ish"));
     }
 }

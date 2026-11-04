@@ -3,7 +3,7 @@ source: lib/bombadil-browser/src/instrumentation/html.rs
 expression: output
 ---
 <!DOCTYPE html><html><head></head><body>
-<script type="module">window.__bombadil__ = window.__bombadil__ || {
+<script type="module">globalThis.__bombadil__ = globalThis.__bombadil__ || {
 	edges_previous: new Uint8Array(65536),
 	edges_current: new Uint8Array(65536),
 	previous: 0

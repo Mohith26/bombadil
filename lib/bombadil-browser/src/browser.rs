@@ -39,6 +39,7 @@ pub mod instrumentation;
 pub mod quiescence;
 pub mod screenshots;
 pub mod state;
+pub mod workers;
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -157,6 +158,7 @@ struct BrowserContext {
     #[allow(unused, reason = "this is going into the scripts soon")]
     origin: Url,
     browser_options: BrowserOptions,
+    workers: workers::Workers,
 }
 
 pub struct Browser {
@@ -334,6 +336,12 @@ impl Browser {
             events_tx.clone(),
         )?;
 
+        let workers = if browser_options.instrumentation.instrument_files {
+            workers::Workers::track(&connection, &session_id)?
+        } else {
+            workers::Workers::default()
+        };
+
         let context = BrowserContext {
             sender: browser_events_tx,
             events_tx: events_tx.clone(),
@@ -344,6 +352,7 @@ impl Browser {
             latest_frame,
             origin: origin.clone(),
             browser_options: browser_options.clone(),
+            workers,
         };
 
         let instrumentation_errors = instrumentation::instrument_js_coverage(
@@ -939,6 +948,12 @@ fn process_event(
 
             let screenshot = screenshot
                 .ok_or(anyhow!("no screenshot available for state capture"))?;
+
+            context.workers.transfer_coverage(
+                &context.connection,
+                &context.session_id,
+                &call_frame_id,
+            );
 
             let result = BrowserState::current(
                 &context.connection,

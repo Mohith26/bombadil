@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head><title>Worker coverage</title></head>
+<body>
+    <ul id="results"></ul>
+
+    <script>
+    const results = document.getElementById("results");
+
+    function show(text) {
+        const item = document.createElement("li");
+        item.textContent = text;
+        results.appendChild(item);
+    }
+
+    const classic = new Worker("classic-worker.js");
+    classic.onmessage = (event) => show(event.data);
+    classic.postMessage(24);
+
+    const module = new Worker("module-worker.js", { type: "module" });
+    module.onmessage = (event) => show(event.data);
+    module.postMessage(24);
+    </script>
+</body>
+</html>

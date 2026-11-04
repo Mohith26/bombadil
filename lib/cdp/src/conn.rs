@@ -108,9 +108,15 @@ impl<T: Command> PendingResponse<T> {
     /// A response received before the deadline can be collected after it expires.
     #[hotpath::measure]
     pub fn wait(self) -> Result<T::Response> {
-        let (received_at, result) = match self
-            .reply_rx
-            .recv_deadline(self.deadline)
+        let deadline = self.deadline;
+        self.wait_until(deadline)
+    }
+
+    /// Like [`PendingResponse::wait`], but give up at `deadline` if that comes
+    /// before the submission deadline.
+    pub fn wait_until(self, deadline: Instant) -> Result<T::Response> {
+        let deadline = deadline.min(self.deadline);
+        let (received_at, result) = match self.reply_rx.recv_deadline(deadline)
         {
             Ok(reply) => reply,
             Err(mpmc::RecvTimeoutError::Timeout) => {
@@ -123,7 +129,7 @@ impl<T: Command> PendingResponse<T> {
                 );
             }
         };
-        if received_at > self.deadline {
+        if received_at > deadline {
             bail!("timed out waiting for response for {}", self.method);
         }
         let value = result

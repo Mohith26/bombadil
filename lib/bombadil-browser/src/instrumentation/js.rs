@@ -55,7 +55,7 @@ pub const EDGE_MAP_SIZE: usize = 64 * 1024;
 const LOCATION_PREVIOUS: &str = "previous";
 
 const PRELUDE: &str = formatcp!(
-    "window.{NAMESPACE} = window.{NAMESPACE} || {{
+    "globalThis.{NAMESPACE} = globalThis.{NAMESPACE} || {{
         {EDGES_PREVIOUS}: new Uint8Array({EDGE_MAP_SIZE}),
         {EDGES_CURRENT}: new Uint8Array({EDGE_MAP_SIZE}),
         {LOCATION_PREVIOUS}: 0,
@@ -346,9 +346,6 @@ mod tests {
         let code = instrument_source_code(source_id, source, SourceType::cjs())
             .unwrap();
         let mut context = Context::default();
-        context
-            .eval(Source::from_bytes("var window = globalThis;"))
-            .unwrap();
         context.eval(Source::from_bytes(&code)).unwrap();
         let edges = context
             .eval(Source::from_bytes("__bombadil__.edges_current"))
